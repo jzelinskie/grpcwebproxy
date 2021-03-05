@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -13,44 +12,26 @@ import (
 	grpczap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/jzelinskie/cobrautil"
 	"github.com/jzelinskie/stringz"
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
-var rootCmd = &cobra.Command{
-	Use:               "grpcwebproxy",
-	Short:             "A proxy that converts grpc-web into grpc.",
-	Long:              "A proxy that converts grpc-web into grpc.",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return syncViper(cmd, "GRPCWEBPROXY") },
-	Run:               rootRun,
-}
-
-func syncViper(cmd *cobra.Command, prefix string) error {
-	v := viper.New()
-	viper.SetEnvPrefix(prefix)
-
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		suffix := strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
-		v.BindEnv(f.Name, prefix+"_"+suffix)
-
-		if !f.Changed && v.IsSet(f.Name) {
-			val := v.Get(f.Name)
-			cmd.Flags().Set(f.Name, fmt.Sprintf("%v", val))
-		}
-	})
-
-	return nil
-}
-
 func main() {
+	var rootCmd = &cobra.Command{
+		Use:               "grpcwebproxy",
+		Short:             "A proxy that converts grpc-web into grpc.",
+		Long:              "A proxy that converts grpc-web into grpc.",
+		PersistentPreRunE: cobrautil.SyncViperPreRunE("GRPCWEBPROXY"),
+		Run:               rootRun,
+	}
+
 	rootCmd.Flags().String("upstream-addr", "127.0.0.1:50051", "address of the upstream gRPC service")
 	rootCmd.Flags().String("upstream-cert-path", "", "local path to the TLS certificate of the upstream gRPC service")
 	rootCmd.Flags().String("web-addr", ":80", "address to listen on for grpc-web requests")
@@ -65,12 +46,15 @@ func main() {
 
 func rootRun(cmd *cobra.Command, args []string) {
 	logger, _ := zap.NewProduction()
-	if MustGetBool(cmd, "debug") {
+	if cobrautil.MustGetBool(cmd, "debug") {
 		logger, _ = zap.NewDevelopment()
 	}
 	defer logger.Sync()
 
-	upstream, err := NewUpstreamConnection(MustGetString(cmd, "upstream-addr"), MustGetString(cmd, "upstream-cert-path"))
+	upstream, err := NewUpstreamConnection(
+		cobrautil.MustGetString(cmd, "upstream-addr"),
+		cobrautil.MustGetStringExpanded(cmd, "upstream-cert-path"),
+	)
 	if err != nil {
 		logger.Fatal("failed to connect to upstream", zap.String("error", err.Error()))
 	}
@@ -80,18 +64,18 @@ func rootRun(cmd *cobra.Command, args []string) {
 		logger.Fatal("failed to init grpc server", zap.String("error", err.Error()))
 	}
 
-	origins := strings.Split(MustGetString(cmd, "web-allowed-origins"), ",")
-	grpcwebsrv := NewGrpcWebServer(srv, MustGetString(cmd, "web-addr"), origins)
+	origins := strings.Split(cobrautil.MustGetString(cmd, "web-allowed-origins"), ",")
+	grpcwebsrv := NewGrpcWebServer(srv, cobrautil.MustGetString(cmd, "web-addr"), origins)
 	go func() {
 		ListenMaybeTLS(
 			logger,
 			grpcwebsrv,
-			MustGetString(cmd, "web-cert-path"),
-			MustGetString(cmd, "web-key-path"),
+			cobrautil.MustGetStringExpanded(cmd, "web-cert-path"),
+			cobrautil.MustGetStringExpanded(cmd, "web-key-path"),
 		)
 	}()
 
-	metricsrv := NewMetricsServer(MustGetString(cmd, "metrics-addr"))
+	metricsrv := NewMetricsServer(cobrautil.MustGetString(cmd, "metrics-addr"))
 	go func() {
 		if err := metricsrv.ListenAndServe(); err != http.ErrServerClosed {
 			logger.Fatal("failed while serving metrics", zap.Error(err))
@@ -211,20 +195,4 @@ func NewAllowedOriginsFunc(urls []string) func(string) bool {
 	return func(origin string) bool {
 		return stringz.SliceContains(urls, origin)
 	}
-}
-
-func MustGetBool(cmd *cobra.Command, key string) bool {
-	val, err := cmd.Flags().GetBool(key)
-	if err != nil {
-		panic(fmt.Sprintf("failed to find flag %s: %s", key, err))
-	}
-	return val
-}
-
-func MustGetString(cmd *cobra.Command, key string) string {
-	val, err := cmd.Flags().GetString(key)
-	if err != nil {
-		panic(fmt.Sprintf("failed to find flag %s: %s", key, err))
-	}
-	return os.ExpandEnv(val)
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"os"
+	"os/signal"
 	"strings"
 
 	grpcmw "github.com/grpc-ecosystem/go-grpc-middleware"
@@ -79,46 +81,79 @@ func rootRun(cmd *cobra.Command, args []string) {
 	}
 
 	origins := strings.Split(MustGetString(cmd, "web-allowed-origins"), ",")
-	grpcwebsrv, err := NewGrpcWebServer(srv, origins)
-	if err != nil {
-		logger.Fatal("failed to init grpcweb server", zap.String("error", err.Error()))
-	}
-
+	grpcwebsrv := NewGrpcWebServer(srv, MustGetString(cmd, "web-addr"), origins)
 	go func() {
-		certPath := MustGetString(cmd, "web-cert-path")
-		keyPath := MustGetString(cmd, "web-key-path")
-		websrv := &http.Server{
-			Addr:    MustGetString(cmd, "web-addr"),
-			Handler: grpcwebsrv,
-		}
+		ListenMaybeTLS(
+			logger,
+			grpcwebsrv,
+			MustGetString(cmd, "web-cert-path"),
+			MustGetString(cmd, "web-key-path"),
+		)
+	}()
 
-		if certPath != "" && keyPath != "" {
-			logger.Info(
-				"grpc-web server listening over HTTPS",
-				zap.String("addr", MustGetString(cmd, "web-addr")),
-				zap.String("certPath", certPath),
-				zap.String("keyPath", keyPath),
-			)
-			websrv.ListenAndServeTLS(certPath, keyPath)
-		} else {
-			logger.Info(
-				"grpc-web server listening over HTTP",
-				zap.String("addr", MustGetString(cmd, "web-addr")),
-			)
-			websrv.ListenAndServe()
+	metricsrv := NewMetricsServer(MustGetString(cmd, "metrics-addr"))
+	go func() {
+		if err := metricsrv.ListenAndServe(); err != http.ErrServerClosed {
+			logger.Fatal("failed while serving metrics", zap.Error(err))
 		}
 	}()
 
-	logger.Info("metrics server listening over HTTP", zap.String("addr", MustGetString(cmd, "metrics-addr")))
-	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(MustGetString(cmd, "metrics-addr"), nil)
+	signalctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
+	for {
+		select {
+		case <-signalctx.Done():
+			if err := grpcwebsrv.Close(); err != nil {
+				logger.Fatal("failed while shutting down metrics server", zap.Error(err))
+			}
+			if err := metricsrv.Close(); err != nil {
+				logger.Fatal("failed while shutting down metrics server", zap.Error(err))
+			}
+			return
+		}
+	}
 }
 
-func NewGrpcWebServer(srv *grpc.Server, allowedOrigins []string) (*grpcweb.WrappedGrpcServer, error) {
-	return grpcweb.WrapServer(srv,
-		grpcweb.WithCorsForRegisteredEndpointsOnly(false),
-		grpcweb.WithOriginFunc(NewAllowedOriginsFunc(allowedOrigins)),
-	), nil
+func NewMetricsServer(addr string) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	return &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+}
+
+func ListenMaybeTLS(logger *zap.Logger, srv *http.Server, certPath, keyPath string) {
+	if certPath != "" && keyPath != "" {
+		logger.Info(
+			"grpc-web server listening over HTTPS",
+			zap.String("addr", srv.Addr),
+			zap.String("certPath", certPath),
+			zap.String("keyPath", keyPath),
+		)
+		srv.ListenAndServeTLS(certPath, keyPath)
+	} else {
+		logger.Info(
+			"grpc-web server listening over HTTP",
+			zap.String("addr", srv.Addr),
+		)
+		srv.ListenAndServe()
+	}
+}
+
+func NewGrpcWebServer(srv *grpc.Server, addr string, allowedOrigins []string) *http.Server {
+	return &http.Server{
+		Addr: addr,
+		Handler: grpcweb.WrapServer(srv,
+			grpcweb.WithCorsForRegisteredEndpointsOnly(false),
+			grpcweb.WithOriginFunc(NewAllowedOriginsFunc(allowedOrigins)),
+		),
+	}
 }
 
 func NewGrpcProxyServer(logger *zap.Logger, upstream *grpc.ClientConn) (*grpc.Server, error) {

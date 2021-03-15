@@ -37,7 +37,7 @@ func main() {
 	rootCmd.Flags().String("web-addr", ":80", "address to listen on for grpc-web requests")
 	rootCmd.Flags().String("web-key-path", "", "local path to the TLS key of the grpc-web server")
 	rootCmd.Flags().String("web-cert-path", "", "local path to the TLS certificate of the grpc-web server")
-	rootCmd.Flags().String("web-allowed-origins", "", "CORS allowed origins for grpc-web (comma-separated)")
+	rootCmd.Flags().String("web-allowed-origins", "", "CORS allowed origins for grpc-web (comma-separated); leave blank for all (*)")
 	rootCmd.Flags().String("metrics-addr", ":9090", "address to listen on for the metrics server")
 	rootCmd.Flags().Bool("debug", false, "debug log verbosity")
 

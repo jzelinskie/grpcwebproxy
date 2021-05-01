@@ -82,17 +82,12 @@ func rootRun(cmd *cobra.Command, args []string) {
 	}()
 
 	signalctx, _ := signal.NotifyContext(context.Background(), os.Interrupt)
-	for {
-		select {
-		case <-signalctx.Done():
-			if err := grpcwebsrv.Close(); err != nil {
-				log.Fatal().Err(err).Msg("failed while shutting down metrics server")
-			}
-			if err := metricsrv.Close(); err != nil {
-				log.Fatal().Err(err).Msg("failed while shutting down metrics server")
-			}
-			return
-		}
+	<-signalctx.Done() // Block until we've received a signal.
+	if err := grpcwebsrv.Close(); err != nil {
+		log.Fatal().Err(err).Msg("failed while shutting down metrics server")
+	}
+	if err := metricsrv.Close(); err != nil {
+		log.Fatal().Err(err).Msg("failed while shutting down metrics server")
 	}
 }
 

@@ -9,15 +9,17 @@ import (
 	"strings"
 
 	grpcmw "github.com/grpc-ecosystem/go-grpc-middleware"
-	grpczap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpczerolog "github.com/grpc-ecosystem/go-grpc-middleware/providers/zerolog/v2"
+	grpclog "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	grpcprom "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/jzelinskie/cobrautil"
 	"github.com/jzelinskie/stringz"
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -45,30 +47,27 @@ func main() {
 }
 
 func rootRun(cmd *cobra.Command, args []string) {
-	logger, _ := zap.NewProduction()
 	if cobrautil.MustGetBool(cmd, "debug") {
-		logger, _ = zap.NewDevelopment()
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
-	defer logger.Sync()
 
 	upstream, err := NewUpstreamConnection(
 		cobrautil.MustGetString(cmd, "upstream-addr"),
 		cobrautil.MustGetStringExpanded(cmd, "upstream-cert-path"),
 	)
 	if err != nil {
-		logger.Fatal("failed to connect to upstream", zap.String("error", err.Error()))
+		log.Fatal().Err(err).Msg("failed to connect to upstream")
 	}
 
-	srv, err := NewGrpcProxyServer(logger, upstream)
+	srv, err := NewGrpcProxyServer(upstream)
 	if err != nil {
-		logger.Fatal("failed to init grpc server", zap.String("error", err.Error()))
+		log.Fatal().Err(err).Msg("failed to init grpc server")
 	}
 
 	origins := strings.Split(cobrautil.MustGetString(cmd, "web-allowed-origins"), ",")
 	grpcwebsrv := NewGrpcWebServer(srv, cobrautil.MustGetString(cmd, "web-addr"), origins)
 	go func() {
 		ListenMaybeTLS(
-			logger,
 			grpcwebsrv,
 			cobrautil.MustGetStringExpanded(cmd, "web-cert-path"),
 			cobrautil.MustGetStringExpanded(cmd, "web-key-path"),
@@ -78,7 +77,7 @@ func rootRun(cmd *cobra.Command, args []string) {
 	metricsrv := NewMetricsServer(cobrautil.MustGetString(cmd, "metrics-addr"))
 	go func() {
 		if err := metricsrv.ListenAndServe(); err != http.ErrServerClosed {
-			logger.Fatal("failed while serving metrics", zap.Error(err))
+			log.Fatal().Err(err).Msg("failed while serving metrics")
 		}
 	}()
 
@@ -87,10 +86,10 @@ func rootRun(cmd *cobra.Command, args []string) {
 		select {
 		case <-signalctx.Done():
 			if err := grpcwebsrv.Close(); err != nil {
-				logger.Fatal("failed while shutting down metrics server", zap.Error(err))
+				log.Fatal().Err(err).Msg("failed while shutting down metrics server")
 			}
 			if err := metricsrv.Close(); err != nil {
-				logger.Fatal("failed while shutting down metrics server", zap.Error(err))
+				log.Fatal().Err(err).Msg("failed while shutting down metrics server")
 			}
 			return
 		}
@@ -112,20 +111,16 @@ func NewMetricsServer(addr string) *http.Server {
 	}
 }
 
-func ListenMaybeTLS(logger *zap.Logger, srv *http.Server, certPath, keyPath string) {
+func ListenMaybeTLS(srv *http.Server, certPath, keyPath string) {
 	if certPath != "" && keyPath != "" {
-		logger.Info(
-			"grpc-web server listening over HTTPS",
-			zap.String("addr", srv.Addr),
-			zap.String("certPath", certPath),
-			zap.String("keyPath", keyPath),
-		)
+		log.Info().
+			Str("addr", srv.Addr).
+			Str("certPath", certPath).
+			Str("keyPath", keyPath).
+			Msg("grpc-web server listening over HTTPS")
 		srv.ListenAndServeTLS(certPath, keyPath)
 	} else {
-		logger.Info(
-			"grpc-web server listening over HTTP",
-			zap.String("addr", srv.Addr),
-		)
+		log.Info().Str("addr", srv.Addr).Msg("grpc-web server listening over HTTP")
 		srv.ListenAndServe()
 	}
 }
@@ -140,9 +135,8 @@ func NewGrpcWebServer(srv *grpc.Server, addr string, allowedOrigins []string) *h
 	}
 }
 
-func NewGrpcProxyServer(logger *zap.Logger, upstream *grpc.ClientConn) (*grpc.Server, error) {
+func NewGrpcProxyServer(upstream *grpc.ClientConn) (*grpc.Server, error) {
 	grpc.EnableTracing = true
-	grpczap.ReplaceGrpcLogger(logger)
 
 	// If the connection header is present in the request from the web client,
 	// the actual connection to the backend will not be established.
@@ -159,11 +153,11 @@ func NewGrpcProxyServer(logger *zap.Logger, upstream *grpc.ClientConn) (*grpc.Se
 		grpc.CustomCodec(proxy.Codec()),
 		grpc.UnknownServiceHandler(proxy.TransparentHandler(director)),
 		grpcmw.WithUnaryServerChain(
-			grpczap.UnaryServerInterceptor(logger),
+			grpclog.UnaryServerInterceptor(grpczerolog.InterceptorLogger(log.Logger)),
 			grpcprom.UnaryServerInterceptor,
 		),
 		grpcmw.WithStreamServerChain(
-			grpczap.StreamServerInterceptor(logger),
+			grpclog.StreamServerInterceptor(grpczerolog.InterceptorLogger(log.Logger)),
 			grpcprom.StreamServerInterceptor,
 		),
 	), nil

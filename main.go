@@ -17,7 +17,6 @@ import (
 	"github.com/jzelinskie/stringz"
 	"github.com/mwitkow/grpc-proxy/proxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -27,11 +26,14 @@ import (
 
 func main() {
 	var rootCmd = &cobra.Command{
-		Use:               "grpcwebproxy",
-		Short:             "A proxy that converts grpc-web into grpc.",
-		Long:              "A proxy that converts grpc-web into grpc.",
-		PersistentPreRunE: cobrautil.SyncViperPreRunE("GRPCWEBPROXY"),
-		Run:               rootRun,
+		Use:   "grpcwebproxy",
+		Short: "A proxy that converts grpc-web into grpc.",
+		Long:  "A proxy that converts grpc-web into grpc.",
+		PersistentPreRunE: cobrautil.CommandStack(
+			cobrautil.SyncViperPreRunE("GRPCWEBPROXY"),
+			cobrautil.ZeroLogPreRunE,
+		),
+		Run: rootRun,
 	}
 
 	rootCmd.Flags().String("upstream-addr", "127.0.0.1:50051", "address of the upstream gRPC service")
@@ -42,15 +44,12 @@ func main() {
 	rootCmd.Flags().String("web-allowed-origins", "", "CORS allowed origins for grpc-web (comma-separated); leave blank for all (*)")
 	rootCmd.Flags().String("metrics-addr", ":9090", "address to listen on for the metrics server")
 	rootCmd.Flags().Bool("debug", false, "debug log verbosity")
+	cobrautil.RegisterZeroLogFlags(rootCmd.Flags())
 
 	rootCmd.Execute()
 }
 
 func rootRun(cmd *cobra.Command, args []string) {
-	if cobrautil.MustGetBool(cmd, "debug") {
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	}
-
 	upstream, err := NewUpstreamConnection(
 		cobrautil.MustGetString(cmd, "upstream-addr"),
 		cobrautil.MustGetStringExpanded(cmd, "upstream-cert-path"),

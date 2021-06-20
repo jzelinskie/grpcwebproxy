@@ -46,7 +46,9 @@ func main() {
 	rootCmd.Flags().Bool("debug", false, "debug log verbosity")
 	cobrautil.RegisterZeroLogFlags(rootCmd.Flags())
 
-	rootCmd.Execute()
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal().Err(err)
+	}
 }
 
 func rootRun(cmd *cobra.Command, args []string) {
@@ -112,10 +114,14 @@ func ListenMaybeTLS(srv *http.Server, certPath, keyPath string) {
 			Str("certPath", certPath).
 			Str("keyPath", keyPath).
 			Msg("grpc-web server listening over HTTPS")
-		srv.ListenAndServeTLS(certPath, keyPath)
+		if err := srv.ListenAndServeTLS(certPath, keyPath); err != nil {
+			log.Fatal().Err(err).Msg("failed to serve grpc-web")
+		}
 	} else {
 		log.Info().Str("addr", srv.Addr).Msg("grpc-web server listening over HTTP")
-		srv.ListenAndServe()
+		if err := srv.ListenAndServe(); err != nil {
+			log.Fatal().Err(err).Msg("failed to serve grpc-web")
+		}
 	}
 }
 
@@ -144,7 +150,7 @@ func NewGrpcProxyServer(upstream *grpc.ClientConn) (*grpc.Server, error) {
 	}
 
 	return grpc.NewServer(
-		grpc.CustomCodec(proxy.Codec()),
+		grpc.CustomCodec(proxy.Codec()), // nolint
 		grpc.UnknownServiceHandler(proxy.TransparentHandler(director)),
 		grpcmw.WithUnaryServerChain(
 			grpclog.UnaryServerInterceptor(grpczerolog.InterceptorLogger(log.Logger)),
@@ -169,7 +175,7 @@ func NewUpstreamConnection(addr string, certPath string) (*grpc.ClientConn, erro
 		opts = append(opts, grpc.WithInsecure())
 	}
 
-	opts = append(opts, grpc.WithCodec(proxy.Codec()))
+	opts = append(opts, grpc.WithCodec(proxy.Codec())) // nolint
 	return grpc.Dial(addr, opts...)
 }
 
